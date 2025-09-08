@@ -2,7 +2,8 @@
 
 AI search engine with web, news, and images.
 
-<img src="https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjBxbWFxamZycWRkMmVhMGFiZnNuZjMxc3lpNHpuamR4OWlwa3F4NSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/QbfaTCB1OmkRmIQwzJ/giphy.gif" width="100%" alt="Fireplexity Demo" />
+<img src="https://github.com/user-attachments/assets/ca00d8eb-c5e5-44ca-81c5-9779bfe9bef6" width="100%" alt="Fireplexity Demo" />
+
 
 ## Setup
 
