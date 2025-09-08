@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
-import { createGroq } from '@ai-sdk/groq'
-import { streamText, generateText, createUIMessageStream, createUIMessageStreamResponse, convertToModelMessages } from 'ai'
+import Together from 'together-ai'
+import { createUIMessageStream, createUIMessageStreamResponse, convertToModelMessages } from 'ai'
 import type { ModelMessage } from 'ai'
 import { detectCompanyTicker } from '@/lib/company-ticker-map'
 import { selectRelevantContent } from '@/lib/content-selection'
@@ -32,20 +32,18 @@ export async function POST(request: Request) {
 
     // Use API key from request body if provided, otherwise fall back to environment variable
     const firecrawlApiKey = body.firecrawlApiKey || process.env.FIRECRAWL_API_KEY
-    const groqApiKey = process.env.GROQ_API_KEY
+    const togetherApiKey = process.env.TOGETHER_API_KEY
     
     if (!firecrawlApiKey) {
       return NextResponse.json({ error: 'Firecrawl API key not configured' }, { status: 500 })
     }
     
-    if (!groqApiKey) {
-      return NextResponse.json({ error: 'Groq API key not configured' }, { status: 500 })
+    if (!togetherApiKey) {
+      return NextResponse.json({ error: 'Together AI API key not configured' }, { status: 500 })
     }
 
-    // Configure Groq with the OSS 120B model
-    const groq = createGroq({
-      apiKey: groqApiKey
-    })
+    // Initialize Together client
+    const together = new Together({ apiKey: togetherApiKey })
 
     // Always perform a fresh search for each query to ensure relevant results
     const isFollowUp = messages.length > 2
@@ -282,19 +280,62 @@ export async function POST(request: Request) {
             ]
           }
           
-          // Stream the text generation using Groq's Kimi K2 Instruct model
-          const result = streamText({
-            model: groq('moonshotai/kimi-k2-instruct'),
-            messages: aiMessages,
-            temperature: 0.7,
-            maxRetries: 2
+          // Stream the text generation using Together AI
+          writer.write({
+            type: 'data-status',
+            id: 'status-4',
+            data: { message: 'Contacting Together AI...' },
+            transient: true
           })
-          
-          // Merge the AI stream into our UIMessage stream
-          writer.merge(result.toUIMessageStream())
-          
-          // Get the full answer for follow-up generation
-          const fullAnswer = await result.text
+
+          const togetherMessages = aiMessages.map((m: any) => ({
+            role: m.role,
+            content: typeof m.content === 'string' ? m.content : String(m.content ?? '')
+          }))
+
+          let fullAnswer = ''
+          let receivedAnyDelta = false
+          try {
+            console.log(`[${requestId}] Starting Together stream`)
+            const togetherStream = await together.chat.completions.create({
+              model: 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
+              messages: togetherMessages,
+              temperature: 0.7,
+              max_tokens: 1024,
+              stream: true
+            })
+
+            // Begin text stream for UI assembly
+            writer.write({ type: 'text-start', id: 'text-1' })
+
+            for await (const chunk of togetherStream) {
+              const delta = chunk?.choices?.[0]?.delta?.content || ''
+              if (delta) {
+                receivedAnyDelta = true
+                fullAnswer += delta
+                writer.write({ type: 'text-delta', id: 'text-1', delta })
+              }
+            }
+            // End text stream so UI materializes a 'text' part
+            writer.write({ type: 'text-end', id: 'text-1' })
+            console.log(`[${requestId}] Together stream completed. receivedAnyDelta=${receivedAnyDelta}`)
+          } catch (togetherError) {
+            console.error(`[${requestId}] Together stream error`, togetherError)
+            throw togetherError
+          }
+
+          if (!receivedAnyDelta) {
+            console.warn(`[${requestId}] Together returned no content`)
+            writer.write({
+              type: 'data-error',
+              id: 'error-empty',
+              data: {
+                error: 'No content received from Together AI.',
+                suggestion: 'Verify TOGETHER_API_KEY and model access. Try again in a moment.'
+              },
+              transient: true
+            })
+          }
           
           // Generate follow-up questions
           const conversationPreview = isFollowUp 
@@ -307,12 +348,20 @@ export async function POST(request: Request) {
             : `user: ${query}`
             
           try {
-            const followUpResponse = await generateText({
-              model: groq('moonshotai/kimi-k2-instruct'),
+            const followUpResponse = await together.chat.completions.create({
+              model: 'meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8',
               messages: [
                 {
                   role: 'system',
-                  content: `Generate 5 natural follow-up questions based on the query and answer.\n                \n                ONLY generate questions if the query warrants them:\n                - Skip for simple greetings or basic acknowledgments\n                - Create questions that feel natural, not forced\n                - Make them genuinely helpful, not just filler\n                - Focus on the topic and sources available\n                \n                If the query doesn't need follow-ups, return an empty response.
+                  content: `Generate 5 natural follow-up questions based on the query and answer.
+                
+                ONLY generate questions if the query warrants them:
+                - Skip for simple greetings or basic acknowledgments
+                - Create questions that feel natural, not forced
+                - Make them genuinely helpful, not just filler
+                - Focus on the topic and sources available
+                
+                If the query doesn't need follow-ups, return an empty response.
                   ${isFollowUp ? 'Consider the full conversation history and avoid repeating previous questions.' : ''}
                   Return only the questions, one per line, no numbering or bullets.`
                 },
@@ -322,11 +371,12 @@ export async function POST(request: Request) {
                 }
               ],
               temperature: 0.7,
-              maxRetries: 2
+              max_tokens: 256
             })
             
             // Process follow-up questions
-            const followUpQuestions = followUpResponse.text
+            const followUpText = followUpResponse?.choices?.[0]?.message?.content || ''
+            const followUpQuestions = followUpText
               .split('\n')
               .map((q: string) => q.trim())
               .filter((q: string) => q.length > 0)
@@ -352,19 +402,19 @@ export async function POST(request: Request) {
             ? error.status
             : undefined
           
-          // Provide user-friendly error messages
+          // Provide user-friendly error messages (Firecrawl and Together AI)
           const errorResponses: Record<number, { error: string; suggestion?: string }> = {
             401: {
               error: 'Invalid API key',
-              suggestion: 'Please check your Firecrawl API key is correct.'
+              suggestion: 'Please check your Firecrawl or Together AI API key.'
             },
             402: {
               error: 'Insufficient credits',
-              suggestion: 'You\'ve run out of Firecrawl credits. Please upgrade your plan.'
+              suggestion: 'You\'ve run out of credits. Please upgrade your Firecrawl or Together AI plan.'
             },
             429: {
               error: 'Rate limit exceeded',
-              suggestion: 'Too many requests. Please wait a moment and try again.'
+              suggestion: 'Too many requests to Firecrawl or Together AI. Please wait and try again.'
             },
             504: {
               error: 'Request timeout',
