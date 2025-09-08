@@ -7,7 +7,7 @@ AI search engine with web, news, and images.
 ## Setup
 
 ```bash
-git clone https://github.com/mendableai/fireplexity.git
+git clone https://github.com/vishwajeetdabholkar/fireplexity.git
 cd fireplexity
 npm install
 ```
@@ -39,6 +39,6 @@ Open http://localhost:3000
 ## Get API Keys
 
 - [Firecrawl](https://firecrawl.dev)
-- [Groq](https://groq.com)
+- [TogetherAI](https://www.together.ai/)
 
 MIT License
